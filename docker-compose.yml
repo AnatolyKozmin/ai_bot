@@ -23,6 +23,9 @@ services:
       DB_PATH: /data/jobs.db
       SAVE_ALL: ${SAVE_ALL:-1}
       BACKFILL_LIMIT: ${BACKFILL_LIMIT:-50}
+      
+      # LLM API (optional)
+      LLM_API_URL: ${LLM_API_URL:-}
     
     volumes:
       - ./sessions:/app/sessions

@@ -1,4 +1,4 @@
-from sqlalchemy import BigInteger, Integer, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Integer, String, Text, UniqueConstraint, Boolean
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -23,3 +23,4 @@ class Job(Base):
     text: Mapped[str] = mapped_column(Text, nullable=False)
     url: Mapped[str | None] = mapped_column(Text, nullable=True)
     inserted_at_utc: Mapped[str] = mapped_column(Text, nullable=False)
+    sent: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

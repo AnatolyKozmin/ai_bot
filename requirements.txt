@@ -1,3 +1,4 @@
 telethon
 sqlalchemy>=2.0
 pyyaml
+aiohttp
