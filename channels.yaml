@@ -1,0 +1,39 @@
+channels:
+  - username: vtb_career
+    title: "ВТБ карьера"
+  
+  - username: alfafuture
+    title: "Альфа Будущее"
+  
+  - username: alfabank_career
+    title: "Карьера в Альфа Банке"
+  
+  - username: careersber
+    title: "Карьера в Сбере"
+  
+  - username: cbr_career
+    title: "Карьера в ЦБ"
+  
+  - username: sibur_dao
+    title: "СИБУР"
+  
+  - username: megafonjobs
+    title: "Мегафон"
+  
+  - username: career_v_sogaz
+    title: "СОГАЗ"
+  
+  - username: gpbcareer
+    title: "ГПБ"
+  
+  - username: yaprofessional
+    title: "Я-профессионал"
+  
+  - username: intern_rsv
+    title: "Профразвитие"
+  
+  - username: careeratMars
+    title: "Марс"
+  
+  - username: habr_career
+    title: "Хабр"

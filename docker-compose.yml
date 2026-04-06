@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: telethon_jobs_bot
+    environment:
+      # Telegram API credentials
+      TG_API_ID: ${TG_API_ID}
+      TG_API_HASH: ${TG_API_HASH}
+      TG_PHONE: ${TG_PHONE}
+      TG_SESSION_NAME: ${TG_SESSION_NAME:-jobs_collector}
+      
+      # Channels: используй channels.yaml или TG_CHANNELS env var
+      TG_CHANNELS: ${TG_CHANNELS:-}
+      
+      # Keywords to search for
+      JOB_KEYWORDS: ${JOB_KEYWORDS:-vacancy,job,hiring,full-time,part-time,remote,офер,вакансия,ищем,работа}
+      
+      # Database configuration
+      DB_PATH: /data/jobs.db
+      SAVE_ALL: ${SAVE_ALL:-1}
+      BACKFILL_LIMIT: ${BACKFILL_LIMIT:-50}
+    
+    volumes:
+      - ./sessions:/app/sessions
+      - ./data:/data
+      - ./channels.yaml:/app/channels.yaml
+    
+    networks:
+      - bot_network
+    
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+
+networks:
+  bot_network:
+    driver: bridge
+
+volumes:
+  sessions:
+  data:
