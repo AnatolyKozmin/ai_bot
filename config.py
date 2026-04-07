@@ -2,7 +2,11 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
+
 import yaml
+from dotenv import load_dotenv
+
+_CONFIG_DIR = Path(__file__).resolve().parent
 
 
 def _parse_list(value: str) -> List[str]:
@@ -40,6 +44,8 @@ class Settings:
 
 
 def load_settings() -> Settings:
+    # Чтобы migrate_db.py, send_to_llm_api.py и т.д. видели .env рядом с проектом
+    load_dotenv(_CONFIG_DIR / ".env")
     api_id = os.getenv("TG_API_ID")
     api_hash = os.getenv("TG_API_HASH")
     phone = os.getenv("TG_PHONE")
