@@ -1,6 +1,3 @@
-"""
-Скрипт для отправки постов из базы данных на API LLM.
-"""
 import asyncio
 import os
 from datetime import datetime, timezone

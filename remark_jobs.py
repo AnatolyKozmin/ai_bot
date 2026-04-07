@@ -1,6 +1,3 @@
-"""
-Скрипт для переметки постов в БД перед запуском автоматической отправки.
-"""
 import os
 from config import load_settings
 from database import make_session_factory
