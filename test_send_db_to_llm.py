@@ -17,6 +17,8 @@ import argparse
 import asyncio
 import json
 import os
+import sys
+from dataclasses import dataclass
 from typing import Any
 
 import aiohttp
@@ -66,6 +68,20 @@ def _payload(job: Job) -> dict[str, Any]:
     }
 
 
+@dataclass
+class PostOutcome:
+    http_ok: bool
+    status_code: int
+    accepted_by_api: bool  # success: true в JSON
+    looks_like_vacancy: bool  # непустой parsed (как в API перед записью в sheets)
+    sheets_appended: bool
+    err: str | None = None
+
+
+def _vacancy_from_parsed(parsed: Any) -> bool:
+    return isinstance(parsed, dict) and bool(parsed)
+
+
 async def _post_one(
     session: aiohttp.ClientSession,
     api_url: str,
@@ -73,36 +89,94 @@ async def _post_one(
     headers: dict[str, str],
     job: Job,
     verbose_json: bool,
-) -> bool:
+    index: int,
+    total: int,
+) -> PostOutcome:
+    chat = job.chat_title or job.chat_id
+    prefix = f"[{index}/{total}] job#{job.id} ({chat})"
+
     payload = _payload(job)
     try:
         async with session.post(
             api_url, json=payload, timeout=timeout, headers=headers
         ) as resp:
             raw = await resp.text()
-            ok = resp.status in (200, 201)
-            prefix = "OK " if ok else f"FAIL {resp.status} "
-            print(f"\n--- #{job.id} {prefix}(чат: {job.chat_title or job.chat_id}) ---")
-            if ok:
-                try:
-                    data = json.loads(raw)
-                except json.JSONDecodeError:
-                    print(raw[:500])
-                    return ok
-                llm = (data.get("llm_output") or "")[:400]
-                parsed = data.get("parsed")
-                sheets = data.get("sheets_appended")
-                print(f"llm_output (обрезано): {llm!r}")
-                print(f"parsed keys: {list(parsed.keys()) if isinstance(parsed, dict) else parsed}")
-                print(f"sheets_appended: {sheets}")
-                if verbose_json:
-                    print(json.dumps(data, ensure_ascii=False, indent=2)[:8000])
-            else:
-                print(raw[:500])
-            return ok
+            code = resp.status
+            http_ok = code in (200, 201)
+
+            if not http_ok:
+                tail = raw.replace("\n", " ")[:200]
+                print(
+                    f"{prefix} | НЕ ПРИНЯТО | HTTP {code} | {tail}",
+                    file=sys.stderr,
+                )
+                return PostOutcome(
+                    http_ok=False,
+                    status_code=code,
+                    accepted_by_api=False,
+                    looks_like_vacancy=False,
+                    sheets_appended=False,
+                    err=f"HTTP {code}",
+                )
+
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                print(
+                    f"{prefix} | НЕ ПРИНЯТО | ответ не JSON | {raw[:200]!r}",
+                    file=sys.stderr,
+                )
+                return PostOutcome(
+                    http_ok=True,
+                    status_code=code,
+                    accepted_by_api=False,
+                    looks_like_vacancy=False,
+                    sheets_appended=False,
+                    err="invalid JSON",
+                )
+
+            accepted = bool(data.get("success"))
+            parsed = data.get("parsed")
+            vac = _vacancy_from_parsed(parsed)
+            sheets = bool(data.get("sheets_appended"))
+
+            vac_txt = "да" if vac else "нет (пустой JSON / не вакансия)"
+            sheet_txt = "да" if sheets else "нет"
+            status_txt = "ПРИНЯТО API" if accepted else "ОШИБКА В ОТВЕТЕ (success=false)"
+
+            print(
+                f"{prefix} | {status_txt} | вакансия по parsed: {vac_txt} | "
+                f"строка в Sheets: {sheet_txt}"
+            )
+
+            if verbose_json:
+                llm = (data.get("llm_output") or "")[:600]
+                print(f"    llm_output (фрагмент): {llm!r}")
+                if isinstance(parsed, dict):
+                    print(f"    parsed keys: {list(parsed.keys())}")
+                err = data.get("sheets_error")
+                if err:
+                    print(f"    sheets_error: {err!r}")
+                print(json.dumps(data, ensure_ascii=False, indent=2)[:8000])
+
+            return PostOutcome(
+                http_ok=True,
+                status_code=code,
+                accepted_by_api=accepted,
+                looks_like_vacancy=vac,
+                sheets_appended=sheets,
+            )
+
     except Exception as e:
-        print(f"\n--- #{job.id} ERROR: {e} ---")
-        return False
+        print(f"{prefix} | НЕ ПРИНЯТО | исключение: {e}", file=sys.stderr)
+        return PostOutcome(
+            http_ok=False,
+            status_code=0,
+            accepted_by_api=False,
+            looks_like_vacancy=False,
+            sheets_appended=False,
+            err=str(e),
+        )
 
 
 async def _run(args: argparse.Namespace) -> int:
@@ -116,7 +190,7 @@ async def _run(args: argparse.Namespace) -> int:
     jobs = _pick_jobs(
         session_factory,
         only_unsent=not args.all,
-        limit=args.n,
+        limit=args.limit,
     )
 
     if args.dry_run:
@@ -131,18 +205,51 @@ async def _run(args: argparse.Namespace) -> int:
     timeout = aiohttp.ClientTimeout(total=llm_api_timeout_seconds())
     headers = _headers()
     print(f"API: {api_url}")
-    print(f"Постов: {len(jobs)}, таймаут HTTP: {timeout.total:.0f}s, последовательно")
+    print(
+        f"Постов: {len(jobs)}, таймаут HTTP: {timeout.total:.0f}s, последовательно\n"
+        "Формат строки: [i/N] job#id (чат) | ПРИНЯТО API | вакансия по parsed: да/нет | "
+        "строка в Sheets: да/нет\n"
+    )
 
-    ok_n = 0
+    totals = {
+        "http_ok": 0,
+        "api_success": 0,
+        "vacancy": 0,
+        "sheets": 0,
+        "failed": 0,
+    }
     async with aiohttp.ClientSession() as session:
-        for job in jobs:
-            if await _post_one(
-                session, api_url, timeout, headers, job, args.verbose
-            ):
-                ok_n += 1
+        for i, job in enumerate(jobs, start=1):
+            out = await _post_one(
+                session,
+                api_url,
+                timeout,
+                headers,
+                job,
+                args.verbose,
+                i,
+                len(jobs),
+            )
+            if out.http_ok:
+                totals["http_ok"] += 1
+            if not out.http_ok or out.err:
+                totals["failed"] += 1
+            if out.accepted_by_api:
+                totals["api_success"] += 1
+            if out.looks_like_vacancy:
+                totals["vacancy"] += 1
+            if out.sheets_appended:
+                totals["sheets"] += 1
 
-    print(f"\nИтого: успех {ok_n}/{len(jobs)}")
-    return 0 if ok_n == len(jobs) else 2
+    print(
+        "\n=== сводка ===\n"
+        f"  HTTP 2xx:        {totals['http_ok']}/{len(jobs)}\n"
+        f"  success в JSON:  {totals['api_success']}/{len(jobs)}\n"
+        f"  вакансия (parsed не пустой): {totals['vacancy']}\n"
+        f"  записано в Sheets: {totals['sheets']}\n"
+        f"  ошибок (HTTP / сеть / не JSON): {totals['failed']}"
+    )
+    return 0 if totals["failed"] == 0 and totals["http_ok"] == len(jobs) else 2
 
 
 def main() -> None:
@@ -153,7 +260,12 @@ def main() -> None:
         help="Взять все записи jobs (иначе только sent=False)",
     )
     p.add_argument(
-        "-n", "--limit", type=int, default=None, metavar="N",
+        "-n",
+        "--limit",
+        type=int,
+        default=None,
+        metavar="N",
+        dest="limit",
         help="Максимум N записей",
     )
     p.add_argument(
