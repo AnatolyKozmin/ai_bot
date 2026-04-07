@@ -7,9 +7,10 @@ from telethon.tl.custom.message import Message
 from config import Settings, load_settings
 from database import make_session_factory
 from store import JobStore
-from api_client import get_llm_client
+from api_client import get_llm_client, llm_system_prompt_payload
 from utils import (
     build_keywords_regex,
+    channel_username,
     message_text,
     message_url,
     to_utc_iso,
@@ -25,14 +26,16 @@ async def send_job_to_api(job, llm_client, store: JobStore) -> None:
         "id": job.id,
         "chat_id": job.chat_id,
         "chat_title": job.chat_title,
+        "channel_username": job.channel_username,
         "message_id": job.message_id,
         "sender_id": job.sender_id,
         "date_utc": job.date_utc,
         "text": job.text,
         "url": job.url,
         "inserted_at_utc": job.inserted_at_utc,
+        **llm_system_prompt_payload(),
     }
-    
+
     if await llm_client.send_job(payload):
         store.mark_as_sent(job.id)
         print(f"[API] ✓ Отправлен пост #{job.id}")
@@ -57,10 +60,12 @@ async def process_message(
     chat = await msg.get_chat()
     chat_id = msg.chat_id or 0
     chat_title = getattr(chat, "title", None) or getattr(chat, "username", None)
+    ch_username = channel_username(chat)
     sender_id = msg.sender_id
     job = store.insert_if_new(
         chat_id=chat_id,
         chat_title=chat_title,
+        channel_username=ch_username,
         message_id=msg.id,
         sender_id=sender_id,
         date_utc=to_utc_iso(msg.date),
@@ -68,8 +73,9 @@ async def process_message(
         url=message_url(msg),
     )
     if job:
+        src = f"@{ch_username}" if ch_username else str(chat_title or chat_id)
         print(
-            f"[saved] chat={chat_title or chat_id} msg={msg.id} "
+            f"[saved] tgk={src} msg={msg.id} "
             f"text={text[:80].replace(chr(10), ' ')}"
         )
         # Отправить на API асинхронно (не ждём результата)

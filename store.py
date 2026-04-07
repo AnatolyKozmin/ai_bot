@@ -14,6 +14,7 @@ class JobStore:
         self,
         chat_id: int,
         chat_title: str | None,
+        channel_username: str | None,
         message_id: int,
         sender_id: int | None,
         date_utc: str | None,
@@ -27,6 +28,7 @@ class JobStore:
             .values(
                 chat_id=chat_id,
                 chat_title=chat_title,
+                channel_username=channel_username,
                 message_id=message_id,
                 sender_id=sender_id,
                 date_utc=date_utc,

@@ -24,8 +24,12 @@ services:
       SAVE_ALL: ${SAVE_ALL:-1}
       BACKFILL_LIMIT: ${BACKFILL_LIMIT:-50}
       
-      # LLM API (optional)
+      # LLM API (optional): полный URL, например https://host:8011/parse_post
       LLM_API_URL: ${LLM_API_URL:-}
+      # Должен быть >= OLLAMA_REQUEST_TIMEOUT на сервере API (секунды)
+      LLM_API_TIMEOUT: ${LLM_API_TIMEOUT:-360}
+      # Общий секрет с ai_api (если задан на API в INGEST_SECRET)
+      INGEST_SECRET: ${INGEST_SECRET:-}
     
     volumes:
       - ./sessions:/app/sessions

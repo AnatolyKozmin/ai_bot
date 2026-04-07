@@ -7,10 +7,7 @@ class Base(DeclarativeBase):
 
 
 class Job(Base):
-    """Сохранённое сообщение (как в исходной схеме: даты — ISO-строки в TEXT)
-    
-        TODO: - Добавить привязку к тгк
-    """
+    """Сохранённое сообщение (даты — ISO-строки в TEXT)."""
 
     __tablename__ = "jobs"
     __table_args__ = (
@@ -20,6 +17,7 @@ class Job(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     chat_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    channel_username: Mapped[str | None] = mapped_column(Text, nullable=True)
     message_id: Mapped[int] = mapped_column(Integer, nullable=False)
     sender_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     date_utc: Mapped[str | None] = mapped_column(Text, nullable=True)

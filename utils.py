@@ -26,6 +26,25 @@ def message_text(msg: Message) -> str:
 
 
 def message_url(msg: Message) -> str | None:
-    if msg.chat and getattr(msg.chat, "username", None):
-        return f"https://t.me/{msg.chat.username}/{msg.id}"
+    """Публичная ссылка на пост: t.me/username/id или t.me/c/... для каналов без username."""
+    chat = msg.chat
+    if not chat:
+        return None
+    un = getattr(chat, "username", None)
+    if un:
+        return f"https://t.me/{un}/{msg.id}"
+    cid = msg.chat_id
+    if cid is not None:
+        s = str(cid)
+        if s.startswith("-100"):
+            internal = s[4:]
+            return f"https://t.me/c/{internal}/{msg.id}"
+    return None
+
+
+def channel_username(chat) -> str | None:
+    """Публичный @username канала/чата без символа @; для приватных каналов — None."""
+    un = getattr(chat, "username", None)
+    if un and isinstance(un, str):
+        return un.strip().lstrip("@") or None
     return None

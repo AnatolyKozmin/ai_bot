@@ -1,36 +1,49 @@
 import asyncio
 import os
-from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 import aiohttp
 from sqlalchemy.orm import Session, sessionmaker
 
+from api_client import llm_api_timeout_seconds, llm_system_prompt_payload
 from config import load_settings
 from database import make_session_factory
 from models import Job
+
+
+def _request_headers() -> dict[str, str]:
+    secret = (os.getenv("INGEST_SECRET") or "").strip()
+    if secret:
+        return {"X-Ingest-Secret": secret}
+    return {}
 
 
 async def send_job_to_api(
     session: aiohttp.ClientSession,
     job: Job,
     api_url: str,
+    timeout: aiohttp.ClientTimeout,
+    headers: dict[str, str],
 ) -> bool:
     """Отправить один пост на API LLM."""
-    payload = {
+    payload: dict[str, Any] = {
         "id": job.id,
         "chat_id": job.chat_id,
         "chat_title": job.chat_title,
+        "channel_username": getattr(job, "channel_username", None),
         "message_id": job.message_id,
         "sender_id": job.sender_id,
         "date_utc": job.date_utc,
         "text": job.text,
         "url": job.url,
         "inserted_at_utc": job.inserted_at_utc,
+        **llm_system_prompt_payload(),
     }
-    
+
     try:
-        async with session.post(api_url, json=payload, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+        async with session.post(
+            api_url, json=payload, timeout=timeout, headers=headers
+        ) as resp:
             if resp.status in (200, 201):
                 print(f"✓ Отправлен пост #{job.id} (чат: {job.chat_title or job.chat_id})")
                 return True
@@ -81,12 +94,20 @@ async def main():
     successful = 0
     failed = 0
     
+    timeout_sec = llm_api_timeout_seconds()
+    req_timeout = aiohttp.ClientTimeout(total=timeout_sec)
+    headers = _request_headers()
+    print(f"⏱ HTTP таймаут к API: {timeout_sec:.0f}s (LLM_API_TIMEOUT)")
+
     async with aiohttp.ClientSession() as session:
         for i in range(0, len(jobs), batch_size):
             batch = jobs[i:i + batch_size]
             print(f"\n📤 Отправка батча {i // batch_size + 1}/{(len(jobs) + batch_size - 1) // batch_size}")
-            
-            tasks = [send_job_to_api(session, job, api_url) for job in batch]
+
+            tasks = [
+                send_job_to_api(session, job, api_url, req_timeout, headers)
+                for job in batch
+            ]
             results = await asyncio.gather(*tasks)
             
             successful += sum(results)

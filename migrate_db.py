@@ -14,18 +14,25 @@ def migrate_db(db_path: str) -> bool:
         # Check if column exists
         cursor.execute("PRAGMA table_info(jobs)")
         columns = [column[1] for column in cursor.fetchall()]
-        
-        if 'sent' in columns:
-            print("✓ Колонка 'sent' уже существует")
-            conn.close()
-            return True
-        
-        # Add the column
-        print("Добавляю колонку 'sent' в таблицу jobs...")
-        cursor.execute("ALTER TABLE jobs ADD COLUMN sent BOOLEAN DEFAULT 0 NOT NULL")
-        conn.commit()
-        
-        print("✓ Колонка успешно добавлена")
+        changed = False
+
+        if "sent" not in columns:
+            print("Добавляю колонку 'sent' в таблицу jobs...")
+            cursor.execute("ALTER TABLE jobs ADD COLUMN sent BOOLEAN DEFAULT 0 NOT NULL")
+            conn.commit()
+            print("✓ Колонка 'sent' добавлена")
+            changed = True
+
+        if "channel_username" not in columns:
+            print("Добавляю колонку 'channel_username' в таблицу jobs...")
+            cursor.execute("ALTER TABLE jobs ADD COLUMN channel_username TEXT")
+            conn.commit()
+            print("✓ Колонка 'channel_username' добавлена")
+            changed = True
+
+        if not changed:
+            print("✓ Схема jobs актуальна (sent, channel_username)")
+
         conn.close()
         return True
     except Exception as e:
