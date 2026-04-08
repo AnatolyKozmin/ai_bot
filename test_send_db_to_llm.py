@@ -10,6 +10,8 @@ LLM_SYSTEM_PROMPT* (если заданы).
   python test_send_db_to_llm.py --all        # все строки в jobs
   python test_send_db_to_llm.py -n 5         # первые 5 подходящих
   python test_send_db_to_llm.py --dry-run    # только посчитать
+  python test_send_db_to_llm.py --json-log out.jsonl   # дубль JSONL в файл
+  python test_send_db_to_llm.py --text-limit 0        # полный text в JSON (до 500k)
 """
 from __future__ import annotations
 
@@ -19,7 +21,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TextIO
 
 import aiohttp
 from sqlalchemy.orm import Session, sessionmaker
@@ -82,6 +84,80 @@ def _vacancy_from_parsed(parsed: Any) -> bool:
     return isinstance(parsed, dict) and bool(parsed)
 
 
+def _clip_text(text: str, limit: int | None) -> tuple[str, bool]:
+    """Вернуть (фрагмент, обрезан ли). limit None или 0 = без лимита (макс. 500k)."""
+    if not text:
+        return "", False
+    max_len = 500_000
+    if limit is not None and limit > 0:
+        max_len = min(max_len, limit)
+    if len(text) <= max_len:
+        return text, False
+    return text[:max_len], True
+
+
+def _emit_jsonl(
+    record: dict[str, Any],
+    log_fp: TextIO | None,
+) -> None:
+    line = json.dumps(record, ensure_ascii=False)
+    print(line, flush=True)
+    if log_fp is not None:
+        log_fp.write(line + "\n")
+        log_fp.flush()
+
+
+def _debug_record(
+    *,
+    index: int,
+    total: int,
+    job: Job,
+    outcome: PostOutcome,
+    text_for_json: str,
+    text_was_truncated: bool,
+    http_status: int,
+    api_data: dict[str, Any] | None,
+    raw_response: str | None,
+) -> dict[str, Any]:
+    """
+    принято = HTTP 2xx + ответ распарсен в JSON + success=true (как в теле API).
+    """
+    принято = (
+        outcome.http_ok
+        and outcome.err is None
+        and outcome.accepted_by_api
+    )
+    rec: dict[str, Any] = {
+        "i": index,
+        "n": total,
+        "job_id": job.id,
+        "message_id": job.message_id,
+        "chat_id": job.chat_id,
+        "chat_title": job.chat_title,
+        "channel_username": getattr(job, "channel_username", None),
+        "url": job.url,
+        "text": text_for_json,
+        "text_full_len": len(job.text or ""),
+        "text_truncated": text_was_truncated,
+        "принято": принято,
+        "статус": "принято" if принято else "не принято",
+        "http_status": http_status,
+        "api_success": outcome.accepted_by_api,
+        "вакансия_parsed_непустой": outcome.looks_like_vacancy,
+        "sheets_appended": outcome.sheets_appended,
+        "error": outcome.err,
+    }
+    if api_data is not None:
+        lo = api_data.get("llm_output") or ""
+        rec["llm_output_preview"] = lo[:800] if isinstance(lo, str) else str(lo)[:800]
+        rec["parsed"] = api_data.get("parsed")
+        if api_data.get("sheets_error"):
+            rec["sheets_error"] = api_data.get("sheets_error")
+    if raw_response is not None and not api_data:
+        rec["raw_response_preview"] = raw_response.replace("\n", " ")[:500]
+    return rec
+
+
 async def _post_one(
     session: aiohttp.ClientSession,
     api_url: str,
@@ -91,9 +167,12 @@ async def _post_one(
     verbose_json: bool,
     index: int,
     total: int,
+    text_limit: int | None,
+    log_fp: TextIO | None,
 ) -> PostOutcome:
     chat = job.chat_title or job.chat_id
     prefix = f"[{index}/{total}] job#{job.id} ({chat})"
+    text_json, text_trunc = _clip_text(job.text or "", text_limit)
 
     payload = _payload(job)
     try:
@@ -109,8 +188,9 @@ async def _post_one(
                 print(
                     f"{prefix} | НЕ ПРИНЯТО | HTTP {code} | {tail}",
                     file=sys.stderr,
+                    flush=True,
                 )
-                return PostOutcome(
+                out = PostOutcome(
                     http_ok=False,
                     status_code=code,
                     accepted_by_api=False,
@@ -118,6 +198,21 @@ async def _post_one(
                     sheets_appended=False,
                     err=f"HTTP {code}",
                 )
+                _emit_jsonl(
+                    _debug_record(
+                        index=index,
+                        total=total,
+                        job=job,
+                        outcome=out,
+                        text_for_json=text_json,
+                        text_was_truncated=text_trunc,
+                        http_status=code,
+                        api_data=None,
+                        raw_response=raw,
+                    ),
+                    log_fp,
+                )
+                return out
 
             try:
                 data = json.loads(raw)
@@ -125,8 +220,9 @@ async def _post_one(
                 print(
                     f"{prefix} | НЕ ПРИНЯТО | ответ не JSON | {raw[:200]!r}",
                     file=sys.stderr,
+                    flush=True,
                 )
-                return PostOutcome(
+                out = PostOutcome(
                     http_ok=True,
                     status_code=code,
                     accepted_by_api=False,
@@ -134,6 +230,21 @@ async def _post_one(
                     sheets_appended=False,
                     err="invalid JSON",
                 )
+                _emit_jsonl(
+                    _debug_record(
+                        index=index,
+                        total=total,
+                        job=job,
+                        outcome=out,
+                        text_for_json=text_json,
+                        text_was_truncated=text_trunc,
+                        http_status=code,
+                        api_data=None,
+                        raw_response=raw,
+                    ),
+                    log_fp,
+                )
+                return out
 
             accepted = bool(data.get("success"))
             parsed = data.get("parsed")
@@ -146,30 +257,46 @@ async def _post_one(
 
             print(
                 f"{prefix} | {status_txt} | вакансия по parsed: {vac_txt} | "
-                f"строка в Sheets: {sheet_txt}"
+                f"строка в Sheets: {sheet_txt}",
+                flush=True,
             )
 
             if verbose_json:
                 llm = (data.get("llm_output") or "")[:600]
-                print(f"    llm_output (фрагмент): {llm!r}")
+                print(f"    llm_output (фрагмент): {llm!r}", flush=True)
                 if isinstance(parsed, dict):
-                    print(f"    parsed keys: {list(parsed.keys())}")
+                    print(f"    parsed keys: {list(parsed.keys())}", flush=True)
                 err = data.get("sheets_error")
                 if err:
-                    print(f"    sheets_error: {err!r}")
-                print(json.dumps(data, ensure_ascii=False, indent=2)[:8000])
+                    print(f"    sheets_error: {err!r}", flush=True)
+                print(json.dumps(data, ensure_ascii=False, indent=2)[:8000], flush=True)
 
-            return PostOutcome(
+            out = PostOutcome(
                 http_ok=True,
                 status_code=code,
                 accepted_by_api=accepted,
                 looks_like_vacancy=vac,
                 sheets_appended=sheets,
             )
+            _emit_jsonl(
+                _debug_record(
+                    index=index,
+                    total=total,
+                    job=job,
+                    outcome=out,
+                    text_for_json=text_json,
+                    text_was_truncated=text_trunc,
+                    http_status=code,
+                    api_data=data,
+                    raw_response=None,
+                ),
+                log_fp,
+            )
+            return out
 
     except Exception as e:
-        print(f"{prefix} | НЕ ПРИНЯТО | исключение: {e}", file=sys.stderr)
-        return PostOutcome(
+        print(f"{prefix} | НЕ ПРИНЯТО | исключение: {e}", file=sys.stderr, flush=True)
+        out = PostOutcome(
             http_ok=False,
             status_code=0,
             accepted_by_api=False,
@@ -177,6 +304,21 @@ async def _post_one(
             sheets_appended=False,
             err=str(e),
         )
+        _emit_jsonl(
+            _debug_record(
+                index=index,
+                total=total,
+                job=job,
+                outcome=out,
+                text_for_json=text_json,
+                text_was_truncated=text_trunc,
+                http_status=0,
+                api_data=None,
+                raw_response=None,
+            ),
+            log_fp,
+        )
+        return out
 
 
 async def _run(args: argparse.Namespace) -> int:
@@ -207,39 +349,49 @@ async def _run(args: argparse.Namespace) -> int:
     print(f"API: {api_url}")
     print(
         f"Постов: {len(jobs)}, таймаут HTTP: {timeout.total:.0f}s, последовательно\n"
-        "Формат строки: [i/N] job#id (чат) | ПРИНЯТО API | вакансия по parsed: да/нет | "
-        "строка в Sheets: да/нет\n"
+        "Человекочитаемо: [i/N] job#… | ПРИНЯТО API | вакансия | Sheets\n"
+        "Сразу под ним одна строка JSON (поле «принято», «статус», «text», …) — для отладки в реальном времени.\n",
+        flush=True,
     )
 
-    totals = {
-        "http_ok": 0,
-        "api_success": 0,
-        "vacancy": 0,
-        "sheets": 0,
-        "failed": 0,
-    }
-    async with aiohttp.ClientSession() as session:
-        for i, job in enumerate(jobs, start=1):
-            out = await _post_one(
-                session,
-                api_url,
-                timeout,
-                headers,
-                job,
-                args.verbose,
-                i,
-                len(jobs),
-            )
-            if out.http_ok:
-                totals["http_ok"] += 1
-            if not out.http_ok or out.err:
-                totals["failed"] += 1
-            if out.accepted_by_api:
-                totals["api_success"] += 1
-            if out.looks_like_vacancy:
-                totals["vacancy"] += 1
-            if out.sheets_appended:
-                totals["sheets"] += 1
+    log_fp: TextIO | None = None
+    if args.json_log:
+        log_fp = open(args.json_log, "a", encoding="utf-8")
+    try:
+        totals = {
+            "http_ok": 0,
+            "api_success": 0,
+            "vacancy": 0,
+            "sheets": 0,
+            "failed": 0,
+        }
+        async with aiohttp.ClientSession() as session:
+            for i, job in enumerate(jobs, start=1):
+                out = await _post_one(
+                    session,
+                    api_url,
+                    timeout,
+                    headers,
+                    job,
+                    args.verbose,
+                    i,
+                    len(jobs),
+                    args.text_limit,
+                    log_fp,
+                )
+                if out.http_ok:
+                    totals["http_ok"] += 1
+                if not out.http_ok or out.err:
+                    totals["failed"] += 1
+                if out.accepted_by_api:
+                    totals["api_success"] += 1
+                if out.looks_like_vacancy:
+                    totals["vacancy"] += 1
+                if out.sheets_appended:
+                    totals["sheets"] += 1
+    finally:
+        if log_fp is not None:
+            log_fp.close()
 
     print(
         "\n=== сводка ===\n"
@@ -247,7 +399,8 @@ async def _run(args: argparse.Namespace) -> int:
         f"  success в JSON:  {totals['api_success']}/{len(jobs)}\n"
         f"  вакансия (parsed не пустой): {totals['vacancy']}\n"
         f"  записано в Sheets: {totals['sheets']}\n"
-        f"  ошибок (HTTP / сеть / не JSON): {totals['failed']}"
+        f"  ошибок (HTTP / сеть / не JSON): {totals['failed']}",
+        flush=True,
     )
     return 0 if totals["failed"] == 0 and totals["http_ok"] == len(jobs) else 2
 
@@ -277,6 +430,18 @@ def main() -> None:
         "-v", "--verbose",
         action="store_true",
         help="Печатать больше JSON ответа API",
+    )
+    p.add_argument(
+        "--json-log",
+        metavar="FILE",
+        help="Дополнительно дублировать JSON-строки в файл (append, JSONL)",
+    )
+    p.add_argument(
+        "--text-limit",
+        type=int,
+        default=12_000,
+        metavar="N",
+        help="Макс. длина поля text в JSON (0 = до 500k символов). По умолчанию 12000",
     )
     args = p.parse_args()
     raise SystemExit(asyncio.run(_run(args)))
