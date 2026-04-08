@@ -10,7 +10,9 @@ LLM_SYSTEM_PROMPT* (если заданы).
   python test_send_db_to_llm.py --all        # все строки в jobs
   python test_send_db_to_llm.py -n 5         # первые 5 подходящих
   python test_send_db_to_llm.py --dry-run    # только посчитать
-  python test_send_db_to_llm.py --json-log out.jsonl   # дубль JSONL в файл
+  python test_send_db_to_llm.py --json-log out.jsonl   # только JSON-строки в JSONL-файл
+  python test_send_db_to_llm.py --tee run.log          # копия ВСЕГО вывода в файл (+ терминал)
+  python test_send_db_to_llm.py --errors-to-stdout     # ошибки и в stderr, и в stdout (удобно в IDE)
   python test_send_db_to_llm.py --text-limit 0        # полный text в JSON (до 500k)
 """
 from __future__ import annotations
@@ -30,6 +32,27 @@ from api_client import llm_api_timeout_seconds, llm_system_prompt_payload
 from config import load_settings
 from database import make_session_factory
 from models import Job
+
+# Дублирование вывода: терминал (stdout/stderr) + опционально файл (--tee)
+_tee_fp: TextIO | None = None
+_errors_also_stdout: bool = False
+
+
+def _out(*args: Any, **kwargs: Any) -> None:
+    kwargs.setdefault("flush", True)
+    print(*args, **kwargs)
+    if _tee_fp is not None:
+        print(*args, file=_tee_fp, flush=True, **{k: v for k, v in kwargs.items() if k != "file"})
+
+
+def _err(*args: Any, **kwargs: Any) -> None:
+    kwargs.setdefault("flush", True)
+    print(*args, file=sys.stderr, **kwargs)
+    if _errors_also_stdout:
+        print("! ", end="", file=sys.stdout, flush=True)
+        print(*args, file=sys.stdout, flush=True, **{k: v for k, v in kwargs.items() if k != "file"})
+    if _tee_fp is not None:
+        print(*args, file=_tee_fp, flush=True, **{k: v for k, v in kwargs.items() if k != "file"})
 
 
 def _headers() -> dict[str, str]:
@@ -101,7 +124,7 @@ def _emit_jsonl(
     log_fp: TextIO | None,
 ) -> None:
     line = json.dumps(record, ensure_ascii=False)
-    print(line, flush=True)
+    _out(line)
     if log_fp is not None:
         log_fp.write(line + "\n")
         log_fp.flush()
@@ -185,11 +208,7 @@ async def _post_one(
 
             if not http_ok:
                 tail = raw.replace("\n", " ")[:200]
-                print(
-                    f"{prefix} | НЕ ПРИНЯТО | HTTP {code} | {tail}",
-                    file=sys.stderr,
-                    flush=True,
-                )
+                _err(f"{prefix} | НЕ ПРИНЯТО | HTTP {code} | {tail}")
                 out = PostOutcome(
                     http_ok=False,
                     status_code=code,
@@ -217,11 +236,7 @@ async def _post_one(
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError:
-                print(
-                    f"{prefix} | НЕ ПРИНЯТО | ответ не JSON | {raw[:200]!r}",
-                    file=sys.stderr,
-                    flush=True,
-                )
+                _err(f"{prefix} | НЕ ПРИНЯТО | ответ не JSON | {raw[:200]!r}")
                 out = PostOutcome(
                     http_ok=True,
                     status_code=code,
@@ -255,21 +270,20 @@ async def _post_one(
             sheet_txt = "да" if sheets else "нет"
             status_txt = "ПРИНЯТО API" if accepted else "ОШИБКА В ОТВЕТЕ (success=false)"
 
-            print(
+            _out(
                 f"{prefix} | {status_txt} | вакансия по parsed: {vac_txt} | "
-                f"строка в Sheets: {sheet_txt}",
-                flush=True,
+                f"строка в Sheets: {sheet_txt}"
             )
 
             if verbose_json:
                 llm = (data.get("llm_output") or "")[:600]
-                print(f"    llm_output (фрагмент): {llm!r}", flush=True)
+                _out(f"    llm_output (фрагмент): {llm!r}")
                 if isinstance(parsed, dict):
-                    print(f"    parsed keys: {list(parsed.keys())}", flush=True)
+                    _out(f"    parsed keys: {list(parsed.keys())}")
                 err = data.get("sheets_error")
                 if err:
-                    print(f"    sheets_error: {err!r}", flush=True)
-                print(json.dumps(data, ensure_ascii=False, indent=2)[:8000], flush=True)
+                    _out(f"    sheets_error: {err!r}")
+                _out(json.dumps(data, ensure_ascii=False, indent=2)[:8000])
 
             out = PostOutcome(
                 http_ok=True,
@@ -295,7 +309,7 @@ async def _post_one(
             return out
 
     except Exception as e:
-        print(f"{prefix} | НЕ ПРИНЯТО | исключение: {e}", file=sys.stderr, flush=True)
+        _err(f"{prefix} | НЕ ПРИНЯТО | исключение: {e}")
         out = PostOutcome(
             http_ok=False,
             status_code=0,
@@ -322,6 +336,9 @@ async def _post_one(
 
 
 async def _run(args: argparse.Namespace) -> int:
+    global _tee_fp, _errors_also_stdout
+    _errors_also_stdout = bool(args.errors_to_stdout)
+
     settings = load_settings()
     api_url = (os.getenv("LLM_API_URL") or "").strip()
     if not api_url:
@@ -344,14 +361,21 @@ async def _run(args: argparse.Namespace) -> int:
         print("Нет постов. Попробуйте --all или проверьте БД.")
         return 0
 
+    tee_path = (args.tee or (os.getenv("TEST_SEND_TEE") or "").strip() or None)
+    if tee_path:
+        _tee_fp = open(tee_path, "a", encoding="utf-8")
+
     timeout = aiohttp.ClientTimeout(total=llm_api_timeout_seconds())
     headers = _headers()
-    print(f"API: {api_url}")
-    print(
+    _out(f"API: {api_url}")
+    _out(
         f"Постов: {len(jobs)}, таймаут HTTP: {timeout.total:.0f}s, последовательно\n"
         "Человекочитаемо: [i/N] job#… | ПРИНЯТО API | вакансия | Sheets\n"
-        "Сразу под ним одна строка JSON (поле «принято», «статус», «text», …) — для отладки в реальном времени.\n",
-        flush=True,
+        "Сразу под ним одна строка JSON («принято», «статус», «text», …).\n"
+        "Всё это идёт в stdout терминала"
+        + ("; копия в " + tee_path if tee_path else "")
+        + ("; ошибки дублируются в stdout" if _errors_also_stdout else "")
+        + ".\n"
     )
 
     log_fp: TextIO | None = None
@@ -392,15 +416,17 @@ async def _run(args: argparse.Namespace) -> int:
     finally:
         if log_fp is not None:
             log_fp.close()
+        if _tee_fp is not None:
+            _tee_fp.close()
+            _tee_fp = None
 
-    print(
+    _out(
         "\n=== сводка ===\n"
         f"  HTTP 2xx:        {totals['http_ok']}/{len(jobs)}\n"
         f"  success в JSON:  {totals['api_success']}/{len(jobs)}\n"
         f"  вакансия (parsed не пустой): {totals['vacancy']}\n"
         f"  записано в Sheets: {totals['sheets']}\n"
-        f"  ошибок (HTTP / сеть / не JSON): {totals['failed']}",
-        flush=True,
+        f"  ошибок (HTTP / сеть / не JSON): {totals['failed']}"
     )
     return 0 if totals["failed"] == 0 and totals["http_ok"] == len(jobs) else 2
 
@@ -442,6 +468,16 @@ def main() -> None:
         default=12_000,
         metavar="N",
         help="Макс. длина поля text в JSON (0 = до 500k символов). По умолчанию 12000",
+    )
+    p.add_argument(
+        "--tee",
+        metavar="FILE",
+        help="Дублировать весь вывод (человекочитаемый + JSON) в файл, параллельно терминалу",
+    )
+    p.add_argument(
+        "--errors-to-stdout",
+        action="store_true",
+        help="Сообщения об ошибках показывать и в stderr, и в stdout (если IDE скрывает stderr)",
     )
     args = p.parse_args()
     raise SystemExit(asyncio.run(_run(args)))
