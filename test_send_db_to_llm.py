@@ -42,17 +42,20 @@ def _out(*args: Any, **kwargs: Any) -> None:
     kwargs.setdefault("flush", True)
     print(*args, **kwargs)
     if _tee_fp is not None:
-        print(*args, file=_tee_fp, flush=True, **{k: v for k, v in kwargs.items() if k != "file"})
+        rest = {k: v for k, v in kwargs.items() if k not in ("file", "flush")}
+        print(*args, file=_tee_fp, flush=kwargs.get("flush", True), **rest)
 
 
 def _err(*args: Any, **kwargs: Any) -> None:
     kwargs.setdefault("flush", True)
     print(*args, file=sys.stderr, **kwargs)
+    fl = kwargs.get("flush", True)
+    rest = {k: v for k, v in kwargs.items() if k not in ("file", "flush")}
     if _errors_also_stdout:
         print("! ", end="", file=sys.stdout, flush=True)
-        print(*args, file=sys.stdout, flush=True, **{k: v for k, v in kwargs.items() if k != "file"})
+        print(*args, file=sys.stdout, flush=fl, **rest)
     if _tee_fp is not None:
-        print(*args, file=_tee_fp, flush=True, **{k: v for k, v in kwargs.items() if k != "file"})
+        print(*args, file=_tee_fp, flush=fl, **rest)
 
 
 def _headers() -> dict[str, str]:
